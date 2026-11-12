@@ -948,7 +948,13 @@ function TipLauncher({ onOpen }) {
 
 function TipForm({ onSubmit, onCancel, saving }) {
   const [form, setForm] = useState(initialTipForm);
-  const [selectedMarkets, setSelectedMarkets] = useState([]);
+  const [receiptMarkets, setSelectedMarkets] = useState([]);
+  const [entryMode, setEntryMode] = useState("ocr");
+  const [manual, setManual] = useState({ home: "", away: "", market: "", sport: "Futebol", odd: 1.9, stake: 1, bookmaker: "Betano" });
+  const selectedMarkets = entryMode === "manual"
+    ? (manual.home.trim() && manual.away.trim() && manual.market.trim() ? [{ key: "manual", homeTeam: manual.home.trim(), awayTeam: manual.away.trim(), market: manual.market.trim(), group: manual.sport, odd: Number(manual.odd) }] : [])
+    : receiptMarkets;
+  const activeStake = entryMode === "manual" ? Number(manual.stake) : Number(form.stake);
   const [receiptImage, setReceiptImage] = useState("");
   const [receiptText, setReceiptText] = useState("");
   const [ocrStatus, setOcrStatus] = useState("");
@@ -1016,18 +1022,19 @@ function TipForm({ onSubmit, onCancel, saving }) {
     .map((item) => Number(item.odd))
     .filter((odd) => odd >= 1.01)
     .reduce((total, odd) => total * odd, selectedMarkets.some((item) => Number(item.odd) >= 1.01) ? 1 : Number(form.odd) || 1);
-  const receiptReturn = Number(form.potentialReturn);
+  const receiptReturn = entryMode === "manual" ? 0 : Number(form.potentialReturn);
   const ticketOdd =
-    receiptReturn > 0 && Number(form.stake) > 0 ? receiptReturn / Number(form.stake) : parsedTicketOdd;
-  const calculatedReturn = Number(form.stake || 0) * ticketOdd;
-  const potentialReturn = Number(form.potentialReturn) > 0 ? Number(form.potentialReturn) : calculatedReturn;
-  const sport = inferSportFromSelections(selectedMarkets, receiptText);
+    entryMode === "manual" ? Number(manual.odd) : receiptReturn > 0 && activeStake > 0 ? receiptReturn / activeStake : parsedTicketOdd;
+  const calculatedReturn = activeStake * ticketOdd;
+  const potentialReturn = receiptReturn > 0 ? receiptReturn : calculatedReturn;
+  const sport = entryMode === "manual" ? manual.sport : inferSportFromSelections(selectedMarkets, receiptText);
 
   async function handleSubmit(event) {
     event.preventDefault();
     const hasGlobalMatch = form.homeTeam.trim() && form.awayTeam.trim();
     const hasReceiptMatches = selectedMarkets.every((item) => item.homeTeam && item.awayTeam);
     if ((!hasGlobalMatch && !hasReceiptMatches) || !selectedMarkets.length) return;
+    if (!Number.isFinite(ticketOdd) || ticketOdd < 1.01 || !Number.isFinite(activeStake) || activeStake <= 0) return;
 
     const placedAt = new Date().toISOString();
     const firstSelection = selectedMarkets[0];
@@ -1036,6 +1043,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
     const ticketData = {
       ...form,
       odd: ticketOdd,
+      stake: activeStake,
       result: "pending",
       event:
         selectedMarkets.length > 1
@@ -1051,12 +1059,12 @@ function TipForm({ onSubmit, onCancel, saving }) {
       sport,
       homeTeam,
       awayTeam,
-      bookmaker: form.bookmaker.trim(),
+      bookmaker: entryMode === "manual" ? manual.bookmaker : form.bookmaker.trim(),
       ticketOdd,
       ticketSelections: selectedMarkets,
       potentialReturn,
-      receiptText: receiptText.trim(),
-      source: receiptText.trim() ? "ocr" : "manual",
+      receiptText: entryMode === "manual" ? "" : receiptText.trim(),
+      source: entryMode,
       placedAt,
     };
     const tipsToSave = [{ ...ticketData, profit: profitForTip(ticketData) }];
@@ -1065,6 +1073,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
       await onSubmit(tipsToSave);
       setForm(initialTipForm);
       setSelectedMarkets([]);
+      setManual((current) => ({ ...current, home: "", away: "", market: "" }));
     } catch {
       // A mensagem de erro ja e tratada no componente principal.
     }
@@ -1075,7 +1084,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
       <div className="panel-heading">
         <div>
           <span className="eyebrow">Novo bilhete</span>
-          <h2>Transcrever e salvar bilhete</h2>
+          <h2>{entryMode === "manual" ? "Cadastrar tip manual" : "Transcrever e salvar bilhete"}</h2>
         </div>
         <button className="secondary-button" onClick={onCancel} type="button">
           <ArrowLeft size={17} />
@@ -1083,9 +1092,17 @@ function TipForm({ onSubmit, onCancel, saving }) {
         </button>
       </div>
 
+      <div className="switch-row" aria-label="Tipo de cadastro">
+        <button type="button" disabled={ocrBusy || saving} aria-pressed={entryMode === "manual"} className={entryMode === "manual" ? "active" : ""} onClick={() => setEntryMode("manual")}>Tip manual</button>
+        <button type="button" disabled={ocrBusy || saving} aria-pressed={entryMode === "ocr"} className={entryMode === "ocr" ? "active" : ""} onClick={() => setEntryMode("ocr")}>Bilhete por imagem</button>
+      </div>
       <div className="ticket-layout">
         <div className="ticket-main">
-          <section className="receipt-reader" onPaste={handlePaste}>
+          {entryMode === "manual" ? <div className="form-grid">
+            {[ ["home", "Mandante / Jogador 1"], ["away", "Visitante / Jogador 2"], ["market", "Mercado e seleção"] ].map(([name, label]) => <label className="field" key={name}><span>{label}</span><input required value={manual[name]} onChange={(event) => setManual({ ...manual, [name]: event.target.value })} /></label>)}
+            <label className="field"><span>Esporte</span><select value={manual.sport} onChange={(event) => setManual({ ...manual, sport: event.target.value })}>{["Futebol", "Tênis", "Basquete", "FIFA", "Vôlei", "Outro"].map(value => <option key={value}>{value}</option>)}</select></label>
+            <label className="field"><span>Casa de apostas</span><select value={manual.bookmaker} onChange={(event) => setManual({ ...manual, bookmaker: event.target.value })}>{bookmakers.map(value => <option key={value}>{value}</option>)}</select></label>
+          </div> : <section className="receipt-reader" onPaste={handlePaste}>
             <div>
               <span className="eyebrow">Print da aposta</span>
               <strong>Enviar foto ou colar print</strong>
@@ -1126,14 +1143,14 @@ function TipForm({ onSubmit, onCancel, saving }) {
             >
               Usar texto na aposta
             </button>
-          </section>
+          </section>}
 
         </div>
 
         <aside className="ticket-summary">
           <span className="eyebrow">Bilhete</span>
-          <strong>{form.homeTeam && form.awayTeam ? `${form.homeTeam} x ${form.awayTeam}` : "Bilhete"}</strong>
-          <small>{form.bookmaker}</small>
+          <strong>{entryMode === "manual" ? (manual.home && manual.away ? `${manual.home} x ${manual.away}` : "Tip manual") : form.homeTeam && form.awayTeam ? `${form.homeTeam} x ${form.awayTeam}` : "Bilhete"}</strong>
+          <small>{entryMode === "manual" ? manual.bookmaker : form.bookmaker}</small>
           {sport && <span className="sport-badge">{sport}</span>}
 
           <div className="selected-markets">
@@ -1149,18 +1166,18 @@ function TipForm({ onSubmit, onCancel, saving }) {
                 </div>
               ))
             ) : (
-              <p>Envie um print para montar o bilhete.</p>
+              <p>{entryMode === "manual" ? "Preencha o confronto e o mercado." : "Envie um print para montar o bilhete."}</p>
             )}
           </div>
 
           <div className="form-grid compact-grid">
             <label className="field">
               <span>Odd total</span>
-              <input min={1.01} readOnly step={0.01} type="number" value={ticketOdd.toFixed(2)} />
+              <input required min={1.01} readOnly={entryMode !== "manual"} step={0.01} type="number" value={entryMode === "manual" ? manual.odd : ticketOdd.toFixed(2)} onChange={(event) => setManual({ ...manual, odd: event.target.value })} />
             </label>
             <label className="field">
               <span>Valor apostado</span>
-              <input min={0.01} name="stake" onChange={handleChange} step={0.01} type="number" value={form.stake} />
+              <input required min={0.01} name="stake" onChange={entryMode === "manual" ? (event) => setManual({ ...manual, stake: event.target.value }) : handleChange} step={0.01} type="number" value={entryMode === "manual" ? manual.stake : form.stake} />
             </label>
             <label className="field">
               <span>Retorno potencial</span>
@@ -1174,7 +1191,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
 
           <button className="primary-button" disabled={saving || !selectedMarkets.length} type="submit">
             <Plus size={18} />
-            {saving ? "Salvando..." : "Salvar bilhete"}
+            {saving ? "Salvando..." : entryMode === "manual" ? "Salvar tip" : "Salvar bilhete"}
           </button>
         </aside>
       </div>
