@@ -1,0 +1,125 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && (
+          request.auth.token.admin == true
+          || request.auth.token.role == 'admin'
+        );
+    }
+
+    function userCreateIsValid(userId) {
+      return signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == userId
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == 'tipster'
+        && request.resource.data.keys().hasOnly([
+          'uid',
+          'name',
+          'nick',
+          'phone',
+          'email',
+          'createdAt',
+          'createdAtIso',
+          'role'
+        ]);
+    }
+
+    function tipCreateIsValid() {
+      return signedIn()
+        && request.resource.data.tipsterId == request.auth.uid
+        && request.resource.data.tipsterName is string
+        && request.resource.data.placedAt is string
+        && request.resource.data.result == 'pending'
+        && request.resource.data.keys().hasAll([
+          'tipsterId',
+          'tipsterName',
+          'event',
+          'pick',
+          'odd',
+          'stake',
+          'result',
+          'placedAt'
+        ]);
+    }
+
+    function tipResultUpdateIsValid() {
+      return isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'result',
+          'profit',
+          'pushValue',
+          'resolvedAt',
+          'updatedAt'
+        ])
+        && request.resource.data.result in ['pending', 'green', 'red', 'push'];
+    }
+
+    function publicRankingCreateIsValid(tipsterId) {
+      return signedIn()
+        && request.auth.uid == tipsterId
+        && request.resource.data.id == tipsterId
+        && request.resource.data.name is string
+        && request.resource.data.source == 'profile'
+        && request.resource.data.tips == 0
+        && request.resource.data.settledTips == 0
+        && request.resource.data.wins == 0
+        && request.resource.data.losses == 0
+        && request.resource.data.pushes == 0
+        && request.resource.data.staked == 0
+        && request.resource.data.profit == 0
+        && request.resource.data.averageOdd == 0
+        && request.resource.data.hitRate == 0
+        && request.resource.data.roi == 0
+        && request.resource.data.clv == 0
+        && request.resource.data.drawdown == 0
+        && request.resource.data.score == 0
+        && request.resource.data.chartPoints == []
+        && request.resource.data.keys().hasOnly([
+          'id',
+          'name',
+          'market',
+          'tips',
+          'settledTips',
+          'wins',
+          'losses',
+          'pushes',
+          'staked',
+          'profit',
+          'averageOdd',
+          'hitRate',
+          'roi',
+          'clv',
+          'drawdown',
+          'score',
+          'chartPoints',
+          'source'
+        ]);
+    }
+
+    match /tips/{tipId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.tipsterId == request.auth.uid);
+      allow create: if tipCreateIsValid();
+      allow update: if tipResultUpdateIsValid();
+      allow delete: if isAdmin();
+    }
+
+    match /rankings/{tipsterId} {
+      allow read: if true;
+      allow create: if isAdmin() || publicRankingCreateIsValid(tipsterId);
+      allow update, delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == userId);
+      allow create: if userCreateIsValid(userId);
+      allow update, delete: if false;
+    }
+  }
+}

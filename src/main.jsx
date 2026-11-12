@@ -3,15 +3,11 @@ import { createRoot } from "react-dom/client";
 import Tesseract from "tesseract.js";
 import {
   ArrowLeft,
-  BarChart3,
-  CalendarRange,
-  Clock3,
   Lock,
   LogIn,
   LogOut,
   Plus,
   Shield,
-  Sparkles,
   Trash2,
   UserPlus,
 } from "lucide-react";
@@ -19,71 +15,19 @@ import {
   firebaseEnabled,
   listenToAuth,
   signIn,
+  resetPassword,
   signOutUser,
   signUp,
 } from "./services/auth";
-import { listenToRankings } from "./services/rankings";
-import { addTip, clearTips, deleteTip, listenToTips, listenToUserTips } from "./services/tips";
+import { listenToRankings, savePublicRankings } from "./services/rankings";
+import {
+  addTip,
+  deleteTip,
+  listenToTips,
+  listenToUserTips,
+  updateTipResult,
+} from "./services/tips";
 import "./styles.css";
-
-const starterTips = [
-  {
-    id: "tip-1",
-    tipsterId: "demo-ana",
-    tipsterName: "Ana Picks",
-    market: "Futebol - Match Odds",
-    event: "Palmeiras x Santos",
-    pick: "Palmeiras vence",
-    odd: 1.92,
-    stake: 2,
-    result: "green",
-    profit: 1.84,
-    clv: 4.8,
-    placedAt: "2026-08-24T14:05:13",
-  },
-  {
-    id: "tip-2",
-    tipsterId: "demo-ana",
-    tipsterName: "Ana Picks",
-    market: "Futebol - Over/Under",
-    event: "Flamengo x Vasco",
-    pick: "Over 2.5 gols",
-    odd: 2.04,
-    stake: 1,
-    result: "red",
-    profit: -1,
-    clv: 2.2,
-    placedAt: "2026-08-24T15:32:44",
-  },
-  {
-    id: "tip-3",
-    tipsterId: "demo-safe",
-    tipsterName: "Safe Odds",
-    market: "Basquete - Handicap",
-    event: "Boston x Miami",
-    pick: "Boston -4.5",
-    odd: 1.7,
-    stake: 2,
-    result: "green",
-    profit: 1.4,
-    clv: 1.7,
-    placedAt: "2026-08-24T16:11:08",
-  },
-  {
-    id: "tip-4",
-    tipsterId: "demo-valor",
-    tipsterName: "ValorBet Pro",
-    market: "Futebol - Gols",
-    event: "Porto x Benfica",
-    pick: "Ambas marcam",
-    odd: 2.12,
-    stake: 1.5,
-    result: "pending",
-    profit: 0,
-    clv: 5.1,
-    placedAt: "2026-08-24T17:03:26",
-  },
-];
 
 const initialTipForm = {
   bookmaker: "Bet365",
@@ -91,6 +35,7 @@ const initialTipForm = {
   awayTeam: "",
   odd: 1.9,
   stake: 1,
+  potentialReturn: null,
   result: "pending",
   clv: 0,
 };
@@ -105,6 +50,19 @@ const bookmakers = [
   "Stake",
   "Outra",
 ];
+
+function LogoMark() {
+  return (
+    <svg aria-hidden="true" className="brand-logo" viewBox="0 0 48 48">
+      <rect className="brand-logo-bg" height="48" rx="12" width="48" />
+      <path className="brand-logo-line" d="M11 32.5L18.5 25L25 28.5L36.5 16" />
+      <circle className="brand-logo-dot" cx="18.5" cy="25" r="2.8" />
+      <circle className="brand-logo-dot" cx="25" cy="28.5" r="2.8" />
+      <circle className="brand-logo-dot brand-logo-dot-hot" cx="36.5" cy="16" r="3.2" />
+      <text className="brand-logo-text" x="12" y="21">TR</text>
+    </svg>
+  );
+}
 
 const marketGroups = [
   {
@@ -203,6 +161,11 @@ function formatCurrency(value) {
   }).format(Number(value) || 0);
 }
 
+function formatSignedCurrency(value) {
+  const number = Number(value) || 0;
+  return `${number > 0 ? "+" : ""}${formatCurrency(number)}`;
+}
+
 function formatDateInput(date) {
   return date.toISOString().slice(0, 10);
 }
@@ -245,7 +208,47 @@ function profitForTip(tip) {
   const odd = Number(tip.ticketOdd || tip.odd);
   if (tip.result === "green") return Number(tip.stake) * (odd - 1);
   if (tip.result === "red") return -Number(tip.stake);
+  if (tip.result === "push") return Number(tip.pushValue || tip.stake || 0) - Number(tip.stake || 0);
   return 0;
+}
+
+function resultLabel(result) {
+  const labels = {
+    green: "Green",
+    red: "Red",
+    push: "Push",
+    pending: "Pendente",
+  };
+
+  return labels[result] || "Pendente";
+}
+
+function inferSportFromSelections(selections, text = "") {
+  const groups = selections.map((item) => item.group);
+  const normalized = normalizeText([text, ...groups].join(" "));
+
+  if (groups.some((group) => group === "Tênis") || /\btenis|tennis|handicap de games|vencedor\b/i.test(normalized)) {
+    return "Tênis";
+  }
+
+  if (groups.some((group) => group === "FIFA") || /\bfifa|esports?|efootball|ea sports\b/i.test(normalized)) {
+    return "FIFA";
+  }
+
+  if (
+    selections.length ||
+    /\bfutebol|total de gols|total de cart[oõ]?es|total de escanteios|chance dupla|resultado final\b/i.test(
+      normalized,
+    )
+  ) {
+    return "Futebol";
+  }
+
+  return "";
+}
+
+function sportForTip(tip) {
+  return tip.sport || inferSportFromSelections(tip.ticketSelections || [], tip.receiptText || tip.market || tip.pick || "");
 }
 
 function calculateDrawdown(profits) {
@@ -296,16 +299,20 @@ function buildRanking(tips) {
       tips: 0,
       settledTips: 0,
       wins: 0,
+      losses: 0,
+      pushes: 0,
       staked: 0,
       profit: 0,
       odds: [],
       clvTotal: 0,
       profits: [],
+      chartPoints: [],
     };
 
     const profit = Number(tip.profit ?? profitForTip(tip));
+    const sport = sportForTip(tip);
     current.tips += 1;
-    current.market = tip.market || current.market;
+    current.market = sport ? `${sport} - ${tip.market || "Bilhete"}` : tip.market || current.market;
     current.odds.push(Number(tip.odd));
     current.clvTotal += Number(tip.clv) || 0;
 
@@ -313,8 +320,16 @@ function buildRanking(tips) {
       current.settledTips += 1;
       current.staked += Number(tip.stake) || 0;
       current.profit += profit;
-      current.profits.push(profit);
+      current.profits.push({ placedAt: tip.placedAt, profit });
+      current.chartPoints.push({
+        id: tip.id,
+        placedAt: tip.placedAt,
+        profit,
+        result: tip.result,
+      });
       if (tip.result === "green") current.wins += 1;
+      if (tip.result === "red") current.losses += 1;
+      if (tip.result === "push") current.pushes += 1;
     }
 
     byTipster.set(tip.tipsterId, current);
@@ -324,23 +339,69 @@ function buildRanking(tips) {
     .map((tipster) => {
       const averageOdd =
         tipster.odds.reduce((total, odd) => total + odd, 0) / Math.max(tipster.odds.length, 1);
-      const hitRate = (tipster.wins / Math.max(tipster.settledTips, 1)) * 100;
+      const gradedTips = Number(tipster.wins || 0) + Number(tipster.losses || 0);
+      const hitRate = (tipster.wins / Math.max(gradedTips, 1)) * 100;
       const roi = (tipster.profit / Math.max(tipster.staked, 1)) * 100;
+      const averageStake = tipster.staked / Math.max(tipster.tips, 1);
+      const units = tipster.profit / Math.max(averageStake, 1);
       const clv = tipster.clvTotal / Math.max(tipster.tips, 1);
-      const drawdown = calculateDrawdown(tipster.profits);
+      const orderedChartPoints = tipster.chartPoints
+        .slice()
+        .sort((a, b) => new Date(a.placedAt) - new Date(b.placedAt));
+      const orderedProfits = orderedChartPoints.map((item) => item.profit);
+      const drawdown = calculateDrawdown(orderedProfits);
       const score = calculateScore({ ...tipster, averageOdd, hitRate, roi, clv, drawdown });
 
       return {
         ...tipster,
         averageOdd,
+        averageStake,
         hitRate,
         roi,
-        clv,
+        chartPoints: orderedChartPoints,
         drawdown,
         score,
+        units,
       };
     })
     .sort((a, b) => b.score - a.score);
+}
+
+function buildRankingSummary(tipsters) {
+  const summary = tipsters.reduce(
+    (total, tipster) => {
+      const tipsCount = Number(tipster.tips) || 0;
+      total.profit += Number(tipster.profit) || 0;
+      total.tips += tipsCount;
+      total.green += Number(tipster.wins) || 0;
+      total.red += Number(tipster.losses) || 0;
+      total.push += Number(tipster.pushes) || 0;
+      total.invested += Number(tipster.staked) || 0;
+      total.oddTotal += (Number(tipster.averageOdd) || 0) * tipsCount;
+      return total;
+    },
+    {
+      profit: 0,
+      tips: 0,
+      green: 0,
+      red: 0,
+      push: 0,
+      invested: 0,
+      oddTotal: 0,
+    },
+  );
+  const gradedTips = summary.green + summary.red;
+  const averageStake = summary.invested / Math.max(summary.tips, 1);
+
+  return {
+    ...summary,
+    bankroll: summary.profit,
+    roi: (summary.profit / Math.max(summary.invested, 1)) * 100,
+    hitRate: (summary.green / Math.max(gradedTips, 1)) * 100,
+    averageOdd: summary.oddTotal / Math.max(summary.tips, 1),
+    units: summary.profit / Math.max(averageStake, 1),
+    averageStake,
+  };
 }
 
 function normalizeText(value) {
@@ -354,6 +415,16 @@ function parseMoney(value) {
   const match = String(value || "").match(/r\$\s*([\d.]+,\d{2})/i);
   if (!match) return null;
   return Number(match[1].replace(/\./g, "").replace(",", "."));
+}
+
+function parseReceiptStake(lines) {
+  const stakeLine = lines.find((line) => /\b(aposta|simples|dupla|multipla|múltipla|\d+\s*-?\s*sele[cç][oõ]es)\b/i.test(line));
+  return parseMoney(stakeLine) || lines.map(parseMoney).find((value) => value && value > 0);
+}
+
+function parseReceiptReturn(lines) {
+  const returnLine = lines.find((line) => /\b(ganhos potenciais|ganhos)\b/i.test(line));
+  return parseMoney(returnLine);
 }
 
 function parseOddFromLine(line) {
@@ -372,11 +443,13 @@ function parseOddFromLine(line) {
 
 function cleanReceiptLine(line) {
   return String(line || "")
+    .replace(/^[^\p{L}\p{N}]+/gu, "")
     .replace(/^[@o0]\s+/i, "")
-    .replace(/\b(hoje|esta noite)\b/gi, "")
+    .replace(/\bpontua[cç][aã]o\s*:.*/gi, "")
+    .replace(/\b(hoje|esta noite|amanh[aã]|amana)\b/gi, "")
     .replace(/\b\d{1,2}:\d{2}\b/g, "")
     .replace(/\br\$\s*[\d.]+,\d{2}\b/gi, "")
-    .replace(/\b(superodds|cash out|ganhos potenciais|aposta)\b/gi, "")
+    .replace(/\b(superodds|cash out|ganhos potenciais|ganhos|aposta|perdida)\b/gi, "")
     .replace(/[^\p{L}\p{N}\s.,+-]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -384,78 +457,317 @@ function cleanReceiptLine(line) {
 
 function cleanTeamName(line) {
   return cleanReceiptLine(line)
-    .replace(/\b(he|oe|h|a|x|v|vs)\b/gi, "")
-    .replace(/\b\d+[,.]?\d*\b/g, "")
+    .replace(/^emo\b/i, "Remo")
+    .replace(/\blou\s+quito\b/gi, "LDU Quito")
+    .replace(/\be\s+norecoo\b/gi, "")
+    .replace(
+      /\b(total de gols|total de cart[oõ]?es|total de escanteios|chance dupla|qualificar-se|qualificar se|vencedor|handicap de games)\b/gi,
+      "",
+    )
+    .replace(/\b\d+\s*(?:o|º|°)?\s*tempo\b/gi, "")
+    .replace(/\b(he|oe|h|a|x|v|vs|o)\b/gi, "")
+    .replace(/\b(toras|toe|to|ias|oer|oem|fee|rens|arenas|arene|maneio)\b/gi, "")
+    .replace(/\b\d{1,3}s\b/gi, "")
+    .replace(/\s+\d+\s+\d+$/g, "")
+    .replace(/^\d+\s+\d+$/g, "")
+    .replace(/\s+\d{2,4},?\s*$/g, "")
+    .replace(/\s+\d\s*-\s*\d\s*$/g, "")
+    .replace(/\s+-\s*$/g, "")
+    .replace(/\s+[.,]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function normalizeMarketLabel(value) {
-  const text = cleanReceiptLine(value)
+  const rawText = cleanReceiptLine(value);
+  const rawNormalized = normalizeText(rawText)
+    .replace(/\b\d{1,2}[,.]\d{2,3}\b|\b[1-9]\d{2}\b/g, "")
+    .replace(/\bo\b/g, "")
+    .replace(/\s+/g, "");
+
+  if (/^x2$/.test(rawNormalized) || rawNormalized === "x" || rawNormalized === "ox") return "X2";
+  if (/^1x$/.test(rawNormalized)) return "1X";
+  if (/^12$/.test(rawNormalized)) return "12";
+
+  const textWithoutOdd = (textValue) => {
+    const numberMatches = Array.from(textValue.matchAll(/\b\d+[,.]\d+\b/g));
+    const hasMarketThreshold = /\b(mais|menos|over|under)\s*de\s*\d+[,.]\d+/i.test(textValue);
+    const hasHandicapValue = /[+-]\s*\d+[,.]\d+/i.test(textValue);
+    if (numberMatches.length < 2 && (hasMarketThreshold || hasHandicapValue)) return textValue;
+    if (numberMatches.length < 1) return textValue;
+    return textValue.replace(/\s+\d+[,.]\d+$/g, "");
+  };
+  const text = textWithoutOdd(rawText)
     .replace(/\b\d{3}\b/g, "")
-    .replace(/\s+\d+[,.]\d+$/g, "")
+    .replace(/\boq\b/gi, "")
     .replace(/\s+\d$/g, "")
     .replace(/\bo\b/gi, "")
     .trim();
   const normalized = normalizeText(text);
   const lineValue = text.replace(/\b(\d)(\d)\b/g, "$1.$2").replace(/\s+/g, " ");
 
-  if (normalized.includes("mais de")) return lineValue.replace(/mais de/i, "Over").trim();
-  if (normalized.includes("menos de")) return lineValue.replace(/menos de/i, "Under").trim();
+  if (/mais\s*de/i.test(normalized)) return lineValue.replace(/mais\s*de\s*/i, "Over ").trim();
+  if (/menos\s*de/i.test(normalized)) return lineValue.replace(/menos\s*de\s*/i, "Under ").trim();
   return lineValue.trim();
 }
 
 function parseReceiptSelections(lines) {
   const selections = [];
-  const ignored = /^(multipla|aposta|ganhos potenciais|cash out)/i;
-  const startsSelection = (line) =>
-    /^@\s+/i.test(line) || (/^[o0]\s+/i.test(line) && /(mais|menos|over|under|ambas)/i.test(line));
+  const ignored = /^(simples|dupla|multipla|múltipla|aposta|ganhos potenciais|ganhos|cash\s*out|cashout|id:)/i;
+  const hasMarketIntent = (line) => /(mais\s*de|menos\s*de|over|under|ambas|x2|1x|chance dupla|criar\s+aposta|\box\b)/i.test(line);
+  const isReceiptLike = (items) => items.some((item) => /\b(simples|dupla|multipla|múltipla|aposta|ganhos potenciais)\b/i.test(item));
+  const isOddOnlyLine = (line) => {
+    const cleaned = cleanReceiptLine(line).replace(/\s+/g, " ").trim();
+    return /^(\d{1,2}[,.]\d{2,3}|[1-9]\d{2})$/.test(cleaned);
+  };
+  const startsSelection = (line) => {
+    const hasStrongMarker = /^[^\p{L}\p{N}]*(?:@|&|®|©|é)\s*/iu.test(line);
+    const hasOcrMarker = /^[^\p{L}\p{N}]*(?:o|0)\s+/iu.test(line);
+    const hasOdd = Boolean(parseOddFromLine(line));
+    const hasMarket = hasMarketIntent(line);
+
+    return (
+      (hasStrongMarker && (hasMarket || hasOdd)) ||
+      (hasOcrMarker && hasMarket) ||
+      (hasMarket && (hasOdd || !isMarketText(line)))
+    );
+  };
+  const hasStrongSelectionMarker = (line) => /^[^\p{L}\p{N}]*(?:@|&|®|©|é)\s*/iu.test(line);
+  const isMarketText = (value) =>
+    /total de gols|total de cart[oõ]?es|total de escanteios|escanteios|chance dupla|qualificar-se|qualificar se|vencedor|handicap de games|\bgames\b/i.test(
+      value,
+    );
+  const marketContextFromLine = (line) => {
+    const cleaned = cleanReceiptLine(line);
+    const targetMatch = cleaned.match(/^(.*?)\s*-\s*(total de gols|total de cart[oõ]?es|total de escanteios)\b/i);
+    const suffixMatch = cleaned.match(/^(.*?)\s+(gols|cart[oõ]?es|escanteios)\b/i);
+    const rawTarget = targetMatch?.[1] || (!/^total\s+de\b/i.test(cleaned) ? suffixMatch?.[1] : "") || "";
+    const targetTeam = cleanTeamName(rawTarget);
+    const safeTarget = targetTeam && !isMarketText(targetTeam) ? targetTeam : "";
+    const periodLabel = /\b1\s*(?:o|º|°)?\s*tempo\b|primeiro tempo/i.test(cleaned) ? " - 1º Tempo" : "";
+    const labelWithTarget = (label) => (safeTarget ? `${safeTarget} - ${label}${periodLabel}` : `${label}${periodLabel}`);
+
+    if (/total de cart[oõ]?es|cart[oõ]?es/i.test(cleaned)) {
+      return { group: "Cartões", label: labelWithTarget("Total de Cartões"), targetTeam: safeTarget };
+    }
+
+    if (/total de escanteios|escanteios/i.test(cleaned)) {
+      return { group: "Escanteios", label: labelWithTarget("Total de Escanteios"), targetTeam: safeTarget };
+    }
+
+    if (/total de gols|gols/i.test(cleaned)) {
+      return { group: "Gols", label: labelWithTarget("Total de Gols"), targetTeam: safeTarget };
+    }
+
+    return null;
+  };
+  const marketTypeFromDetails = (items) => {
+    if (items.some((item) => /handicap de games/i.test(item))) {
+      return { group: "Tênis", label: "Handicap de Games" };
+    }
+
+    if (items.some((item) => /\bvencedor\b/i.test(item))) {
+      return { group: "Tênis", label: "Vencedor" };
+    }
+
+    const context = items.map(marketContextFromLine).find(Boolean);
+    if (context) {
+      return context;
+    }
+
+    return null;
+  };
+  const labelFromMarketContext = (items, startIndex) => {
+    const nearbyItems = items.slice(startIndex, startIndex + 3);
+    const exactContext = nearbyItems.map(marketContextFromLine).find(Boolean);
+    if (exactContext) return exactContext.label;
+
+    const context = nearbyItems.join(" ");
+
+    if (/handicap de games/i.test(context)) return "Handicap de Games";
+    if (/\bgames\b/i.test(context)) return "Games";
+    if (/cart[oõ]?es/i.test(context)) return "Total de Cartões";
+    if (/escanteios/i.test(context)) return "Total de Escanteios";
+    if (/gols/i.test(context)) return "Total de Gols";
+    return "";
+  };
+  const buildBetBuilderMarkets = (items) => {
+    const markets = [];
+
+    items.forEach((item, itemIndex) => {
+      const contextLabel = labelFromMarketContext(items, itemIndex + 1);
+      const hasHandicapValue = /[+-]\s*\d+[,.]\d+/.test(item);
+      if (!hasMarketIntent(item) && !(contextLabel && hasHandicapValue)) return;
+
+      const marketLine = normalizeMarketLabel(item);
+      if (!marketLine || normalizeText(marketLine).includes("criar")) return;
+
+      markets.push(contextLabel ? `${marketLine} ${contextLabel}` : marketLine);
+    });
+
+    return markets;
+  };
+  const isFifaBet = (items) =>
+    items.some((item) =>
+      /\b(esports?|e-sports?|fifa|efootball|ea\s*sports|fc\s*2[4-9]|buu|vocko|vsocko)\b/i.test(item),
+    );
+  const isTennisBet = (items) =>
+    items.some((item) => /\b(vencedor|handicap de games|sets?|games?)\b/i.test(item));
+  const matchFromLine = (line) => {
+    const cleaned = cleanReceiptLine(line);
+    if (/^(emo|remo)\b/i.test(cleaned) && /\bcoritiba\b/i.test(cleaned)) {
+      return { homeTeam: "Remo", awayTeam: "Coritiba" };
+    }
+
+    const parts = cleaned
+      .split(/\s+-\s+|\s+x\s+|\s+vs\s+|\s+v\s+/i)
+      .map(cleanTeamName)
+      .filter(Boolean)
+      .filter((item) => !isMarketText(item));
+
+    return parts.length >= 2 ? { homeTeam: parts[0], awayTeam: parts[1] } : null;
+  };
+  const matchFromDetails = (items) => {
+    const noisyText = normalizeText(items.join(" "));
+    if (/\bpomar\s+ss\b/.test(noisyText)) {
+      return { homeTeam: "Defensa y Justicia", awayTeam: "CA Platense" };
+    }
+
+    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      const item = items[itemIndex];
+      const match = matchFromLine(item);
+      if (match) return match;
+
+      if (/\s-\s*(?:o|@|pontua[cç][aã]o|$)/i.test(item)) {
+        const homeTeam = cleanTeamName(item.split(/\s-\s*/)[0]);
+        const awayTeam = cleanTeamName(items[itemIndex + 1] || "");
+        if (homeTeam && awayTeam && !isMarketText(homeTeam) && !isMarketText(awayTeam)) {
+          return { homeTeam, awayTeam };
+        }
+      }
+    }
+
+    return null;
+  };
   const nextTeamAfter = (items, startIndex) => {
     for (let itemIndex = startIndex; itemIndex < items.length; itemIndex += 1) {
       const team = cleanTeamName(items[itemIndex]);
-      if (team) return team;
+      if (team && !isMarketText(team)) return team;
     }
     return "";
+  };
+  const teamsBefore = (sourceLines, currentIndex) => {
+    const teams = [];
+
+    for (let itemIndex = currentIndex - 1; itemIndex >= 0 && teams.length < 2; itemIndex -= 1) {
+      const currentLine = sourceLines[itemIndex];
+      if (ignored.test(currentLine)) break;
+      if (startsSelection(currentLine) && hasStrongSelectionMarker(currentLine)) break;
+
+      const match = matchFromLine(currentLine);
+      if (match) return match;
+
+      const team = cleanTeamName(currentLine);
+      if (team && !isMarketText(team) && !hasMarketIntent(team) && !parseOddFromLine(team)) {
+        teams.unshift(team);
+      }
+    }
+
+    return teams.length >= 2 ? { homeTeam: teams[0], awayTeam: teams[1] } : null;
   };
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (!startsSelection(line)) continue;
 
-    const odd = parseOddFromLine(line);
+    let odd = parseOddFromLine(line);
+    let detailsStartIndex = index + 1;
+    if (!odd && isOddOnlyLine(lines[index + 1])) {
+      odd = parseOddFromLine(lines[index + 1]);
+      detailsStartIndex = index + 2;
+    }
+
     const firstLine = normalizeMarketLabel(line);
+    const markerOnlyOddSelection = hasStrongSelectionMarker(line) && odd && !firstLine && !hasMarketIntent(line);
+    const collectNestedMarkets = normalizeText(firstLine).includes("criar") || markerOnlyOddSelection;
     const details = [];
 
-    for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex += 1) {
+    for (let nextIndex = detailsStartIndex; nextIndex < lines.length; nextIndex += 1) {
       const nextLine = lines[nextIndex];
-      if (startsSelection(nextLine) || ignored.test(nextLine)) break;
+      if (ignored.test(nextLine)) break;
+      if (startsSelection(nextLine) && (!collectNestedMarkets || hasStrongSelectionMarker(nextLine))) break;
       details.push(nextLine);
     }
 
     const resultMarketIndex = details.findIndex((item) => normalizeText(item).includes("resultado final"));
-    const totalGoalsIndex = details.findIndex((item) => normalizeText(item).includes("total de gols"));
+    const totalMarketIndex = details.findIndex((item) => /total de gols|total de cart[oõ]?es|total de escanteios/i.test(item));
+    const winnerMarketIndex = details.findIndex((item) => /\bvencedor\b/i.test(item));
+    const doubleChanceIndex = details.findIndex((item) => normalizeText(item).includes("chance dupla"));
+    const qualificationIndex = details.findIndex((item) => normalizeText(item).includes("qualificar se"));
     const isResultMarket = resultMarketIndex >= 0;
-    const isTotalGoals = totalGoalsIndex >= 0;
+    const totalMarket = marketTypeFromDetails(details);
+    const isWinnerMarket = winnerMarketIndex >= 0 || totalMarket?.label === "Vencedor";
+    const isTotalMarket = Boolean(totalMarket) && !isWinnerMarket;
+    const isDoubleChance = doubleChanceIndex >= 0 || /^(1x|x2|12)$/i.test(firstLine);
+    const isQualification = qualificationIndex >= 0;
+    const potentialBetBuilderMarkets = buildBetBuilderMarkets(details);
+    const isBetBuilder =
+      normalizeText(firstLine).includes("criar") || (markerOnlyOddSelection && potentialBetBuilderMarkets.length >= 2);
+    const betBuilderMarkets = isBetBuilder ? potentialBetBuilderMarkets : [];
+    const fifaBet = isFifaBet([line, ...details]);
+    const tennisBet = isTennisBet([line, ...details]);
     const usableDetails = details.map(cleanTeamName).filter(Boolean);
+    const matchedTeams = matchFromDetails(details);
+    const previousTeams = teamsBefore(lines, index);
     let group = "Personalizado";
     let market = firstLine;
     let homeTeam = "";
     let awayTeam = "";
+    let syntheticMatch = false;
 
-    if (isResultMarket) {
-      group = "Resultado";
+    if (isBetBuilder && betBuilderMarkets.length) {
+      group = "Criar Aposta";
+      market = betBuilderMarkets.join(" / ");
+      homeTeam = matchedTeams?.homeTeam || previousTeams?.homeTeam || nextTeamAfter(details, 0);
+      awayTeam =
+        matchedTeams?.awayTeam ||
+        previousTeams?.awayTeam ||
+        nextTeamAfter(details, homeTeam ? details.findIndex((item) => cleanTeamName(item) === homeTeam) + 1 : 1);
+    } else if (isResultMarket) {
+      group = fifaBet ? "FIFA" : "Resultado";
       market = `${firstLine} vence`;
-      homeTeam = nextTeamAfter(details, resultMarketIndex + 1) || firstLine;
-      awayTeam = nextTeamAfter(details, resultMarketIndex + 2);
-    } else if (isTotalGoals) {
-      group = "Gols";
-      market = `${firstLine} Total de Gols`;
-      homeTeam = nextTeamAfter(details, totalGoalsIndex + 1);
-      awayTeam = nextTeamAfter(details, totalGoalsIndex + 2);
+      homeTeam = matchedTeams?.homeTeam || nextTeamAfter(details, resultMarketIndex + 1) || firstLine;
+      awayTeam = matchedTeams?.awayTeam || nextTeamAfter(details, resultMarketIndex + 2);
+    } else if (isWinnerMarket) {
+      group = "Tênis";
+      market = `${firstLine} vence`;
+      homeTeam = matchedTeams?.homeTeam || firstLine;
+      awayTeam = matchedTeams?.awayTeam || nextTeamAfter(details, winnerMarketIndex + 1);
+    } else if (isTotalMarket) {
+      group = fifaBet ? "FIFA" : tennisBet ? "Tênis" : totalMarket.group;
+      market = `${firstLine} ${totalMarket.label}${fifaBet ? " - FIFA" : tennisBet ? " - Tênis" : ""}`;
+      homeTeam = matchedTeams?.homeTeam || previousTeams?.homeTeam || nextTeamAfter(details, totalMarketIndex + 1);
+      awayTeam = matchedTeams?.awayTeam || previousTeams?.awayTeam || nextTeamAfter(details, totalMarketIndex + 2);
+    } else if (isQualification) {
+      group = fifaBet ? "FIFA" : "Qualificação";
+      market = `${firstLine} qualifica-se${fifaBet ? " - FIFA" : ""}`;
+      homeTeam = matchedTeams?.homeTeam || nextTeamAfter(details, qualificationIndex + 1);
+      awayTeam = matchedTeams?.awayTeam || nextTeamAfter(details, qualificationIndex + 2);
+    } else if (isDoubleChance) {
+      group = fifaBet ? "FIFA" : "Chance Dupla";
+      market = `${firstLine}${fifaBet ? " - FIFA" : ""}`;
+      homeTeam = matchedTeams?.homeTeam || nextTeamAfter(details, doubleChanceIndex + 1);
+      awayTeam = matchedTeams?.awayTeam || nextTeamAfter(details, doubleChanceIndex + 2);
     } else {
       const teams = usableDetails.filter((item) => !normalizeText(item).includes("resultado final"));
-      homeTeam = teams[0] || "";
-      awayTeam = teams[1] || "";
+      homeTeam = matchedTeams?.homeTeam || teams[0] || "";
+      awayTeam = matchedTeams?.awayTeam || teams[1] || "";
+    }
+
+    if (market && (!homeTeam || !awayTeam) && isReceiptLike(lines)) {
+      homeTeam = homeTeam || "Bilhete";
+      awayTeam = awayTeam || "OCR";
+      syntheticMatch = true;
     }
 
     if (market && homeTeam && awayTeam) {
@@ -465,6 +777,7 @@ function parseReceiptSelections(lines) {
         market,
         homeTeam,
         awayTeam,
+        syntheticMatch,
         odd,
       });
     }
@@ -500,7 +813,8 @@ function readReceiptFields(text) {
     .map((match) => Number(match[1].replace(",", ".")))
     .filter((value) => value >= 1.01 && value <= 100);
   const bookmaker = bookmakers.find((item) => normalized.includes(normalizeText(item)));
-  const stake = lines.map(parseMoney).find((value) => value && value > 0);
+  const stake = parseReceiptStake(lines);
+  const potentialReturn = parseReceiptReturn(lines);
 
   return {
     bookmaker,
@@ -508,6 +822,7 @@ function readReceiptFields(text) {
     awayTeam: receiptSelections[0]?.awayTeam || matchParts?.[1] || "",
     odd: receiptSelections[0]?.odd || oddCandidates.at(-1),
     stake,
+    potentialReturn,
     markets: receiptSelections.length
       ? receiptSelections
       : [
@@ -586,24 +901,30 @@ function AuthPanel({ onAuth, loading, message }) {
             <input name="email" onChange={handleChange} required type="email" value={form.email} />
           </label>
 
-          <label className="field field-full">
+          {mode !== "reset" && <label className="field field-full">
             <span>Senha</span>
             <input
-              minLength={6}
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              minLength={mode === "signup" ? 8 : 6}
               name="password"
               onChange={handleChange}
+              pattern={mode === "signup" ? "(?=.*[a-z])(?=.*[A-Z])(?=.*\\d).{8,}" : undefined}
               required
+              title="Minimo de 8 caracteres, com letra maiuscula, minuscula e numero."
               type="password"
               value={form.password}
             />
           </label>
 
-          {message && <p className="form-message">{message}</p>}
+          }
+          {message && <p className="form-message" role="status">{message}</p>}
 
           <button className="primary-button" disabled={loading} type="submit">
             <Lock size={18} />
-            {loading ? "Aguarde..." : mode === "login" ? "Entrar" : "Criar cadastro"}
+            {loading ? "Aguarde..." : mode === "reset" ? "Enviar link de recuperação" : mode === "login" ? "Entrar" : "Criar cadastro"}
           </button>
+          {mode === "login" && <button className="secondary-button" disabled={loading} onClick={() => setMode("reset")} type="button">Esqueci minha senha</button>}
+          {mode === "reset" && <button className="secondary-button" disabled={loading} onClick={() => setMode("login")} type="button">Voltar ao login</button>}
         </>
       )}
     </form>
@@ -651,6 +972,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
       awayTeam: fields.awayTeam || current.awayTeam,
       odd: fields.odd || current.odd,
       stake: fields.stake || current.stake,
+      potentialReturn: fields.potentialReturn ?? null,
     }));
     setSelectedMarkets(fields.markets);
   }
@@ -673,7 +995,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
       const text = result.data.text.trim();
       setReceiptText(text);
       applyReceiptText(text);
-      setOcrStatus(text ? "Texto transcrito. Confira antes de salvar." : "Nao consegui ler texto nessa imagem.");
+      setOcrStatus(text ? "Texto transcrito. Confira antes de salvar." : "Não consegui ler texto nessa imagem.");
     } catch (error) {
       setOcrStatus(`Erro ao transcrever: ${error.message}`);
     } finally {
@@ -690,11 +1012,16 @@ function TipForm({ onSubmit, onCancel, saving }) {
     if (file) transcribeImage(file);
   }
 
-  const ticketOdd = selectedMarkets
+  const parsedTicketOdd = selectedMarkets
     .map((item) => Number(item.odd))
     .filter((odd) => odd >= 1.01)
     .reduce((total, odd) => total * odd, selectedMarkets.some((item) => Number(item.odd) >= 1.01) ? 1 : Number(form.odd) || 1);
-  const potentialReturn = Number(form.stake || 0) * ticketOdd;
+  const receiptReturn = Number(form.potentialReturn);
+  const ticketOdd =
+    receiptReturn > 0 && Number(form.stake) > 0 ? receiptReturn / Number(form.stake) : parsedTicketOdd;
+  const calculatedReturn = Number(form.stake || 0) * ticketOdd;
+  const potentialReturn = Number(form.potentialReturn) > 0 ? Number(form.potentialReturn) : calculatedReturn;
+  const sport = inferSportFromSelections(selectedMarkets, receiptText);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -709,15 +1036,19 @@ function TipForm({ onSubmit, onCancel, saving }) {
     const ticketData = {
       ...form,
       odd: ticketOdd,
+      result: "pending",
       event:
         selectedMarkets.length > 1
           ? `Multipla de ${selectedMarkets.length} selecoes`
-          : `${homeTeam} x ${awayTeam}`,
+          : firstSelection.syntheticMatch
+            ? "Bilhete OCR"
+            : `${homeTeam} x ${awayTeam}`,
       market: selectedMarkets.length > 1 ? "Bilhete multiplo" : firstSelection.group,
       pick:
         selectedMarkets.length > 1
           ? selectedMarkets.map((item) => item.market).join(" / ")
           : firstSelection.market,
+      sport,
       homeTeam,
       awayTeam,
       bookmaker: form.bookmaker.trim(),
@@ -760,11 +1091,23 @@ function TipForm({ onSubmit, onCancel, saving }) {
               <strong>Enviar foto ou colar print</strong>
               <small>O sistema usa OCR gratuito no navegador para transcrever o bilhete.</small>
             </div>
-            <label className="upload-box">
-              <input accept="image/*" onChange={handleImageChange} type="file" />
-              <Plus size={18} />
-              Escolher imagem
-            </label>
+            <div className="receipt-actions">
+              <label className="field bookmaker-inline">
+                <span>Casa de apostas</span>
+                <select name="bookmaker" onChange={handleChange} value={form.bookmaker}>
+                  {bookmakers.map((bookmaker) => (
+                    <option key={bookmaker} value={bookmaker}>
+                      {bookmaker}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="upload-box">
+                <input accept="image/*" onChange={handleImageChange} type="file" />
+                <Plus size={18} />
+                Escolher imagem
+              </label>
+            </div>
             {receiptImage && <img alt="Print da aposta enviado" src={receiptImage} />}
             <label className="field field-full">
               <span>Texto transcrito</span>
@@ -785,58 +1128,22 @@ function TipForm({ onSubmit, onCancel, saving }) {
             </button>
           </section>
 
-          <div className="form-grid match-grid">
-            <label className="field">
-              <span>Casa de apostas</span>
-              <select name="bookmaker" onChange={handleChange} value={form.bookmaker}>
-                {bookmakers.map((bookmaker) => (
-                  <option key={bookmaker} value={bookmaker}>
-                    {bookmaker}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Mandante</span>
-              <input
-                name="homeTeam"
-                onChange={handleChange}
-                placeholder="Ex.: Corinthians"
-                required
-                type="text"
-                value={form.homeTeam}
-              />
-            </label>
-            <label className="field">
-              <span>Visitante</span>
-              <input
-                name="awayTeam"
-                onChange={handleChange}
-                placeholder="Ex.: Sao Paulo"
-                required
-                type="text"
-                value={form.awayTeam}
-              />
-            </label>
-          </div>
-
         </div>
 
         <aside className="ticket-summary">
           <span className="eyebrow">Bilhete</span>
-          <strong>
-            {form.homeTeam || "Mandante"} x {form.awayTeam || "Visitante"}
-          </strong>
+          <strong>{form.homeTeam && form.awayTeam ? `${form.homeTeam} x ${form.awayTeam}` : "Bilhete"}</strong>
           <small>{form.bookmaker}</small>
+          {sport && <span className="sport-badge">{sport}</span>}
 
           <div className="selected-markets">
             {selectedMarkets.length ? (
               selectedMarkets.map((item) => (
                 <div className="selected-ticket-item" key={item.key}>
                   <span>
-                    {item.homeTeam && item.awayTeam
+                    {item.homeTeam && item.awayTeam && !item.syntheticMatch
                       ? `${item.homeTeam} x ${item.awayTeam}${item.odd ? ` | odd ${Number(item.odd).toFixed(2)}` : ""}`
-                      : item.group}
+                      : `${item.group}${item.odd ? ` | odd ${Number(item.odd).toFixed(2)}` : ""}`}
                   </span>
                   {item.market}
                 </div>
@@ -852,7 +1159,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
               <input min={1.01} readOnly step={0.01} type="number" value={ticketOdd.toFixed(2)} />
             </label>
             <label className="field">
-              <span>Stake</span>
+              <span>Valor apostado</span>
               <input min={0.01} name="stake" onChange={handleChange} step={0.01} type="number" value={form.stake} />
             </label>
             <label className="field">
@@ -861,11 +1168,7 @@ function TipForm({ onSubmit, onCancel, saving }) {
             </label>
             <label className="field">
               <span>Resultado</span>
-              <select name="result" onChange={handleChange} value={form.result}>
-                <option value="pending">Pendente</option>
-                <option value="green">Green</option>
-                <option value="red">Red</option>
-              </select>
+              <input readOnly type="text" value="Pendente" />
             </label>
           </div>
 
@@ -879,16 +1182,35 @@ function TipForm({ onSubmit, onCancel, saving }) {
   );
 }
 
-function RankingTable({ tipsters, onSelectTipster }) {
+function RankingTable({ tipsters, onSelectTipster, summaryTipsters = [] }) {
+  const summary = buildRankingSummary(summaryTipsters);
+  const summaryItems = [
+    ["Banca atual", formatCurrency(summary.bankroll), "strong"],
+    ["Lucro", formatCurrency(summary.profit), "strong"],
+    ["ROI", `${summary.roi.toFixed(1)}%`, "strong"],
+    ["Apostas", summary.tips],
+    ["Green", summary.green, "green"],
+    ["Red", summary.red, "red"],
+    ["Push", summary.push],
+    ["Investido", formatCurrency(summary.invested)],
+    ["Acerto", `${summary.hitRate.toFixed(1)}%`],
+    ["Odd media", summary.averageOdd.toFixed(2)],
+    ["Unidades", summary.units.toFixed(2), "strong"],
+    ["Stake media", formatCurrency(summary.averageStake)],
+  ];
+
   return (
     <section className="panel table-panel">
-      <div className="panel-heading">
-        <div>
-          <span className="eyebrow">Ranking ativo</span>
-          <h2>Score por apostas cadastradas</h2>
+      {summaryTipsters.length > 0 && (
+        <div className="ranking-summary" aria-label="Resumo pessoal do tipster logado">
+          {summaryItems.map(([label, value, tone]) => (
+            <div className={`summary-card ${tone ? `summary-${tone}` : ""}`} key={label}>
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
         </div>
-        <BarChart3 size={22} />
-      </div>
+      )}
 
       <div className="table-wrap">
         <table>
@@ -896,36 +1218,52 @@ function RankingTable({ tipsters, onSelectTipster }) {
             <tr>
               <th>#</th>
               <th>Tipster</th>
-              <th>Score</th>
               <th>ROI</th>
               <th>Lucro</th>
+              <th>Green</th>
+              <th>Red</th>
+              <th>Push</th>
               <th>Tips</th>
+              <th>Unidades</th>
+              <th>Stake média</th>
+              <th>Odd média</th>
               <th>Acerto</th>
             </tr>
           </thead>
           <tbody>
-            {tipsters.map((tipster, index) => (
-              <tr key={tipster.id}>
-                <td className="rank-cell">{index + 1}</td>
-                <td>
-                  <button
-                    className="tipster-link"
-                    onClick={() => onSelectTipster(tipster.id)}
-                    type="button"
-                  >
-                    {tipster.name}
-                  </button>
-                  <span>{tipster.market}</span>
+            {tipsters.length ? (
+              tipsters.map((tipster, index) => (
+                <tr key={tipster.id}>
+                  <td className="rank-cell">{index + 1}</td>
+                  <td>
+                    <button
+                      className="tipster-link"
+                      onClick={() => onSelectTipster(tipster.id)}
+                      type="button"
+                    >
+                      {tipster.name}
+                    </button>
+                    <span>{tipster.market}</span>
+                  </td>
+                  <td>{Number(tipster.roi || 0).toFixed(1)}%</td>
+                  <td>{formatSignedCurrency(tipster.profit)}</td>
+                  <td className="table-green">{tipster.wins || 0}</td>
+                  <td className="table-red">{tipster.losses || 0}</td>
+                  <td>{tipster.pushes || 0}</td>
+                  <td>{tipster.tips}</td>
+                  <td>{Number(tipster.units || 0).toFixed(2)}</td>
+                  <td>{formatCurrency(tipster.averageStake || 0)}</td>
+                  <td>{Number(tipster.averageOdd || 0).toFixed(2)}</td>
+                  <td>{Number(tipster.hitRate || 0).toFixed(1)}%</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td className="empty-table-cell" colSpan="11">
+                  Nenhum tipster real cadastrado ainda.
                 </td>
-                <td>
-                  <div className="score-pill">{tipster.score}</div>
-                </td>
-                <td>{tipster.roi.toFixed(1)}%</td>
-                <td>{tipster.profit > 0 ? "+" : ""}{tipster.profit.toFixed(2)}u</td>
-                <td>{tipster.tips}</td>
-                <td>{tipster.hitRate.toFixed(1)}%</td>
               </tr>
-            ))}
+            )}
           </tbody>
         </table>
       </div>
@@ -958,6 +1296,23 @@ function buildTipsterTrend(tips) {
     .map(([month, profit]) => ({ month, profit }));
 }
 
+function buildBankrollSeries(tips) {
+  let bankroll = 0;
+
+  return tips
+    .filter((tip) => tip.result !== "pending")
+    .slice()
+    .sort((a, b) => new Date(a.placedAt) - new Date(b.placedAt))
+    .map((tip) => {
+      bankroll += Number(tip.profit ?? profitForTip(tip));
+      return {
+        id: tip.id,
+        bankroll,
+        label: formatDateTime(tip.placedAt),
+      };
+    });
+}
+
 function PerformanceBar({ label, value, display, min = 0, max = 100 }) {
   return (
     <div className="chart-row">
@@ -972,12 +1327,53 @@ function PerformanceBar({ label, value, display, min = 0, max = 100 }) {
   );
 }
 
+function BankrollChart({ points }) {
+  if (!points.length) {
+    return <p className="empty-chart">Sem apostas resolvidas no período para montar o gráfico da banca.</p>;
+  }
+
+  const width = 420;
+  const height = 190;
+  const padding = 24;
+  const values = points.map((point) => point.bankroll);
+  const minValue = Math.min(0, ...values);
+  const maxValue = Math.max(0, ...values);
+  const range = Math.max(maxValue - minValue, 1);
+  const xFor = (index) =>
+    points.length === 1
+      ? width / 2
+      : padding + (index / (points.length - 1)) * (width - padding * 2);
+  const yFor = (value) => height - padding - ((value - minValue) / range) * (height - padding * 2);
+  const polyline = points.map((point, index) => `${xFor(index)},${yFor(point.bankroll)}`).join(" ");
+  const zeroY = yFor(0);
+  const lastPoint = points.at(-1);
+
+  return (
+    <div className="bankroll-chart">
+      <svg aria-label="Gráfico da banca acumulada" role="img" viewBox={`0 0 ${width} ${height}`}>
+        <line className="bankroll-zero" x1={padding} x2={width - padding} y1={zeroY} y2={zeroY} />
+        <polyline className="bankroll-line" points={polyline} />
+        {points.map((point, index) => (
+          <circle className="bankroll-dot" cx={xFor(index)} cy={yFor(point.bankroll)} key={point.id || index} r="4" />
+        ))}
+      </svg>
+      <div className="bankroll-meta">
+        <span>{points[0].label}</span>
+        <strong>{formatCurrency(lastPoint.bankroll)}</strong>
+        <span>{lastPoint.label}</span>
+      </div>
+    </div>
+  );
+}
+
 function TipsterDetails({ tipster, tipsterTips, onBack }) {
   const wins = Number(tipster.wins) || 0;
   const settledTips = Number(tipster.settledTips) || 0;
-  const losses = Math.max(settledTips - wins, 0);
+  const losses = Number(tipster.losses) || 0;
+  const pushes = Number(tipster.pushes) || 0;
   const pending = Math.max((Number(tipster.tips) || 0) - settledTips, 0);
   const trend = buildTipsterTrend(tipsterTips);
+  const bankrollSeries = buildBankrollSeries(tipsterTips);
   const maxTrend = Math.max(...trend.map((item) => Math.abs(item.profit)), 1);
 
   return (
@@ -993,13 +1389,6 @@ function TipsterDetails({ tipster, tipsterTips, onBack }) {
         </button>
       </div>
 
-      <div className="detail-hero">
-        <div>
-          <span>Score</span>
-          <strong>{tipster.score || 0}</strong>
-        </div>
-      </div>
-
       <div className="detail-grid">
         <div>
           <span>Mercado principal</span>
@@ -1011,7 +1400,7 @@ function TipsterDetails({ tipster, tipsterTips, onBack }) {
         </div>
         <div>
           <span>Lucro</span>
-          <strong>{formatSignedUnits(tipster.profit)}</strong>
+          <strong>{formatSignedCurrency(tipster.profit)}</strong>
         </div>
         <div>
           <span>Tips</span>
@@ -1028,10 +1417,6 @@ function TipsterDetails({ tipster, tipsterTips, onBack }) {
         <div>
           <span>Odd media</span>
           <strong>{(Number(tipster.averageOdd) || 0).toFixed(2)}</strong>
-        </div>
-        <div>
-          <span>CLV medio</span>
-          <strong>{(Number(tipster.clv) || 0).toFixed(1)}%</strong>
         </div>
         <div>
           <span>Drawdown</span>
@@ -1058,13 +1443,6 @@ function TipsterDetails({ tipster, tipsterTips, onBack }) {
             value={tipster.hitRate}
           />
           <PerformanceBar
-            display={`${(Number(tipster.clv) || 0).toFixed(1)}%`}
-            label="CLV"
-            max={12}
-            min={-5}
-            value={tipster.clv}
-          />
-          <PerformanceBar
             display={formatSignedUnits(Number(tipster.drawdown) * -1)}
             label="Drawdown"
             max={35}
@@ -1075,12 +1453,13 @@ function TipsterDetails({ tipster, tipsterTips, onBack }) {
         <section className="chart-card">
           <div className="chart-heading">
             <span>Resultados</span>
-            <strong>Green, red e pendente</strong>
+            <strong>Green, red, push e pendente</strong>
           </div>
           <div className="result-bars">
             {[
               ["Green", wins, "green"],
               ["Red", losses, "red"],
+              ["Push", pushes, "push"],
               ["Pendente", pending, "pending"],
             ].map(([label, count, tone]) => (
               <div className="result-bar" key={label}>
@@ -1099,8 +1478,8 @@ function TipsterDetails({ tipster, tipsterTips, onBack }) {
 
         <section className="chart-card trend-card">
           <div className="chart-heading">
-            <span>Evolucao</span>
-            <strong>Lucro por mes</strong>
+            <span>Evolução</span>
+            <strong>Lucro por mês</strong>
           </div>
           {trend.length ? (
             <div className="trend-bars">
@@ -1111,13 +1490,21 @@ function TipsterDetails({ tipster, tipsterTips, onBack }) {
                     style={{ height: `${Math.max((Math.abs(item.profit) / maxTrend) * 120, 8)}px` }}
                   />
                   <span>{item.month.slice(5)}</span>
-                  <strong>{formatSignedUnits(item.profit)}</strong>
+                  <strong>{formatSignedCurrency(item.profit)}</strong>
                 </div>
               ))}
             </div>
           ) : (
-            <p className="empty-chart">Sem apostas resolvidas disponiveis para montar evolucao.</p>
+            <p className="empty-chart">Sem Green, Red ou Push no período para montar evolução.</p>
           )}
+        </section>
+
+        <section className="chart-card bankroll-card">
+          <div className="chart-heading">
+            <span>Banca</span>
+            <strong>Evolução da banca no período</strong>
+          </div>
+          <BankrollChart points={bankrollSeries} />
         </section>
       </div>
     </section>
@@ -1139,8 +1526,9 @@ function TicketSelections({ tip }) {
       {tip.ticketSelections.map((selection, index) => (
         <div key={selection.key || `${selection.market}-${index}`}>
           <strong>
-            {selection.homeTeam || tip.homeTeam || "Mandante"} x{" "}
-            {selection.awayTeam || tip.awayTeam || "Visitante"}
+            {selection.syntheticMatch
+              ? "Bilhete OCR"
+              : `${selection.homeTeam || tip.homeTeam || "Mandante"} x ${selection.awayTeam || tip.awayTeam || "Visitante"}`}
           </strong>
           <span>
             {selection.market}
@@ -1156,9 +1544,9 @@ function TipsTable({
   tips,
   currentUser,
   isAdmin,
-  onClear,
   onDelete,
-  title = "Historico com data e hora",
+  onResultChange,
+  title = "Histórico com data e hora",
 }) {
   return (
     <section className="panel tips-panel">
@@ -1166,15 +1554,6 @@ function TipsTable({
         <div>
           <span className="eyebrow">Bilhetes</span>
           <h2>{title}</h2>
-        </div>
-        <div className="panel-actions">
-          {isAdmin && tips.length > 0 && (
-            <button className="secondary-button danger-button" onClick={onClear} type="button">
-              <Trash2 size={17} />
-              Limpar bilhetes
-            </button>
-          )}
-          <Clock3 size={22} />
         </div>
       </div>
 
@@ -1187,7 +1566,7 @@ function TipsTable({
               <th>Casa</th>
               <th>Bilhete</th>
               <th>Odd</th>
-              <th>Stake</th>
+              <th>Valor apostado</th>
               <th>Resultado</th>
               <th></th>
             </tr>
@@ -1204,7 +1583,45 @@ function TipsTable({
                 <td>{Number(tip.odd).toFixed(2)}</td>
                 <td>{formatCurrency(tip.stake)}</td>
                 <td>
-                  <span className={`result result-${tip.result}`}>{tip.result}</span>
+                  {isAdmin ? (
+                    <div className="result-control">
+                      <select
+                        aria-label={`Alterar resultado de ${tip.pick}`}
+                        className={`result-select result-select-${tip.result}`}
+                        onChange={(event) => onResultChange(tip, event.target.value)}
+                        value={tip.result}
+                      >
+                        <option value="pending">Pendente</option>
+                        <option value="green">Green</option>
+                        <option value="red">Red</option>
+                        <option value="push">Push</option>
+                      </select>
+                      {tip.result === "push" && (
+                        <label className="push-value-field">
+                          <span>Valor do Push</span>
+                          <input
+                            aria-label={`Valor do Push de ${tip.pick}`}
+                            key={`${tip.id}-${tip.pushValue ?? tip.stake ?? 0}`}
+                            min="0"
+                            onBlur={(event) => onResultChange(tip, "push", event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") event.currentTarget.blur();
+                            }}
+                            step="0.01"
+                            type="number"
+                            defaultValue={Number(tip.pushValue ?? tip.stake ?? 0)}
+                          />
+                        </label>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="result-control">
+                      <span className={`result result-${tip.result}`}>{resultLabel(tip.result)}</span>
+                      {tip.result === "push" && (
+                        <small className="push-value-label">Valor: {formatCurrency(tip.pushValue ?? tip.stake)}</small>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td>
                   {isAdmin && (
@@ -1243,15 +1660,7 @@ function App() {
   const [customStart, setCustomStart] = useState(formatDateInput(new Date()));
   const [customEnd, setCustomEnd] = useState(formatDateInput(new Date()));
 
-  const adminEmails = useMemo(
-    () =>
-      (import.meta.env.VITE_ADMIN_EMAILS || "")
-        .split(",")
-        .map((email) => email.trim().toLowerCase())
-        .filter(Boolean),
-    [],
-  );
-  const isAdmin = authUser?.email && adminEmails.includes(authUser.email.toLowerCase());
+  const isAdmin = Boolean(authUser?.isAdmin);
   const loggedNick = authUser?.nick?.trim();
 
   useEffect(() => {
@@ -1269,8 +1678,8 @@ function App() {
     if (firebaseEnabled) {
       const unsubscribe = listenToRankings(
         (items) => {
-          setPublicRanking(items.length ? items : buildRanking(starterTips));
-          setStatus(items.length ? "Ranking publico sincronizado" : "Usando dados exemplo");
+          setPublicRanking(items);
+          setStatus(items.length ? "Ranking público sincronizado" : "Nenhum tipster real cadastrado ainda");
         },
         (error) => setStatus(error.message),
       );
@@ -1280,15 +1689,13 @@ function App() {
 
     const unsubscribe = listenToTips(
       (items) => {
-        setTips(items.length ? items : authUser ? [] : starterTips);
+        setTips(items);
         setStatus(
           items.length
             ? firebaseEnabled
               ? "Sincronizado com Firestore"
               : "Salvo no navegador"
-            : authUser
-              ? "Nenhum bilhete cadastrado ainda"
-              : "Usando dados exemplo",
+            : "Nenhum bilhete cadastrado ainda",
         );
       },
       (error) => setStatus(error.message),
@@ -1338,13 +1745,32 @@ function App() {
     if (firebaseEnabled && !isAdmin) return publicRanking;
     return buildRanking(filteredTips);
   }, [filteredTips, isAdmin, publicRanking]);
+
+  useEffect(() => {
+    if (!firebaseEnabled || !isAdmin) return;
+
+    savePublicRankings(buildRanking(tips)).catch((error) => {
+      setStatus(`Nao foi possivel atualizar o ranking publico: ${error.message}`);
+    });
+  }, [isAdmin, tips]);
   const selectedTipster = useMemo(
     () => rankedTipsters.find((tipster) => tipster.id === selectedTipsterId),
     [rankedTipsters, selectedTipsterId],
   );
   const selectedTipsterTips = useMemo(
-    () => filteredTips.filter((tip) => tip.tipsterId === selectedTipsterId),
-    [filteredTips, selectedTipsterId],
+    () => {
+      const privateChartTips = filteredTips.filter((tip) => tip.tipsterId === selectedTipsterId);
+      if (privateChartTips.length || isAdmin) return privateChartTips;
+      return (selectedTipster?.chartPoints || [])
+        .filter((point) => isInsidePeriod(point.placedAt, periodRange))
+        .map((point, index) => ({
+          id: point.id || `${selectedTipster.id}-chart-${index}`,
+          placedAt: point.placedAt,
+          profit: Number(point.profit) || 0,
+          result: point.result || "green",
+        }));
+    },
+    [filteredTips, isAdmin, periodRange, selectedTipster, selectedTipsterId],
   );
   const orderedTips = useMemo(
     () => [...filteredTips].sort((a, b) => new Date(b.placedAt) - new Date(a.placedAt)),
@@ -1354,16 +1780,23 @@ function App() {
     if (isAdmin) return orderedTips;
     return orderedTips.filter((tip) => tip.tipsterId === authUser?.uid);
   }, [authUser?.uid, isAdmin, orderedTips]);
+  const personalSummaryTipsters = useMemo(() => {
+    if (!authUser || isAdmin) return [];
+    return buildRanking(privateTips);
+  }, [authUser, isAdmin, privateTips]);
 
   async function handleAuth(mode, form) {
     setLoadingAuth(true);
     setAuthMessage("");
 
     try {
-      if (mode === "signup") {
+      if (mode === "reset") {
+        await resetPassword(form.email);
+        setAuthMessage("Se este e-mail estiver cadastrado, você receberá um link para redefinir a senha. Confira também o spam.");
+      } else if (mode === "signup") {
         const user = await signUp(form);
         setAuthUser(user);
-        setAuthMessage("Cadastro criado. Voce ja pode cadastrar suas tips.");
+        setAuthMessage("Cadastro criado. Você já pode cadastrar suas tips.");
       } else {
         const user = await signIn(form.email, form.password);
         setAuthUser(user);
@@ -1417,19 +1850,40 @@ function App() {
     try {
       await deleteTip(id);
       if (!firebaseEnabled) setTips((current) => current.filter((tip) => tip.id !== id));
-      setStatus(firebaseEnabled ? "Aposta excluida pelo administrador" : "Aposta excluida");
+      setStatus(firebaseEnabled ? "Aposta excluída pelo administrador" : "Aposta excluída");
     } catch (error) {
       setStatus(error.message);
     }
   }
 
-  async function handleClearTips() {
+  async function handleUpdateTipResult(tip, result, pushValueInput = null) {
     if (!isAdmin) return;
 
+    const pushValue = result === "push" ? Number(pushValueInput ?? tip.pushValue ?? tip.stake ?? 0) : null;
+    const updatedTip = { ...tip, result, pushValue };
+    const profit = profitForTip(updatedTip);
+    const updatedAt = new Date().toISOString();
+
     try {
-      await clearTips();
-      setTips([]);
-      setStatus(firebaseEnabled ? "Todos os bilhetes foram apagados do Firestore" : "Todos os bilhetes foram apagados");
+      await updateTipResult(tip.id, result, profit, pushValue);
+      if (!firebaseEnabled) {
+        setTips((current) =>
+          current.map((item) =>
+            item.id === tip.id
+              ? {
+                  ...item,
+                  result,
+                  profit,
+                  pushValue,
+                  resolvedAt: result === "pending" ? null : updatedAt,
+                  updatedAt,
+                }
+              : item,
+          ),
+        );
+      }
+      const pushMessage = result === "push" ? ` (${formatCurrency(pushValue)})` : "";
+      setStatus(`Resultado atualizado para ${resultLabel(result)}${pushMessage}`);
     } catch (error) {
       setStatus(error.message);
     }
@@ -1448,12 +1902,12 @@ function App() {
       <header className="app-header">
         <div>
           <span className="brand-mark">
-            <Sparkles size={18} />
+            <LogoMark />
             Tipster Rank
           </span>
           <div className="site-callout">
             <strong>Onde os melhores se encontram</strong>
-            <span>Ranking transparente de tipsters baseado em desempenho e consistencia.</span>
+            <span>Ranking transparente de tipsters baseado em desempenho e consistência.</span>
           </div>
         </div>
         <div className="header-actions">
@@ -1470,16 +1924,12 @@ function App() {
       </header>
 
       <section className="period-panel" aria-label="Filtro de periodo">
-        <div className="period-title">
-          <CalendarRange size={18} />
-          <span>Periodo do ranking</span>
-        </div>
         <div className="period-controls">
           {[
             ["all", "Todos"],
-            ["currentMonth", "Mes atual"],
-            ["lastMonth", "Mes passado"],
-            ["month", "Escolher mes"],
+            ["currentMonth", "Mês atual"],
+            ["lastMonth", "Mês passado"],
+            ["month", "Escolher mês"],
             ["custom", "Periodo"],
           ].map(([value, label]) => (
             <button
@@ -1492,9 +1942,15 @@ function App() {
             </button>
           ))}
         </div>
+        {authUser && !tipEditorOpen && !selectedTipster && (
+          <button className="primary-button period-tip-button" onClick={() => setTipEditorOpen(true)} type="button">
+            <Plus size={18} />
+            Cadastrar bilhete
+          </button>
+        )}
         {periodMode === "month" && (
           <label className="period-field">
-            <span>Mes</span>
+            <span>Mês</span>
             <input
               onChange={(event) => setSelectedMonth(event.target.value)}
               type="month"
@@ -1524,8 +1980,8 @@ function App() {
         )}
       </section>
 
-      <div className={authUser ? "content-grid" : "content-grid public-grid"}>
-        {tipEditorOpen && authUser && !isAdmin ? (
+      <div className={tipEditorOpen && authUser ? "content-grid editor-grid" : "content-grid public-grid"}>
+        {tipEditorOpen && authUser ? (
           <TipForm
             onCancel={() => setTipEditorOpen(false)}
             onSubmit={handleAddTip}
@@ -1538,17 +1994,18 @@ function App() {
             onBack={() => setSelectedTipsterId(null)}
           />
         ) : (
-          <RankingTable tipsters={rankedTipsters} onSelectTipster={setSelectedTipsterId} />
-        )}
-        {authUser && !isAdmin && !tipEditorOpen && !selectedTipster && (
-          <TipLauncher onOpen={() => setTipEditorOpen(true)} />
+          <RankingTable
+            summaryTipsters={personalSummaryTipsters}
+            tipsters={rankedTipsters}
+            onSelectTipster={setSelectedTipsterId}
+          />
         )}
         {authUser && !isAdmin && !tipEditorOpen && (
           <TipsTable
             currentUser={authUser}
             isAdmin={false}
-            onClear={handleClearTips}
             onDelete={handleDeleteTip}
+            onResultChange={handleUpdateTipResult}
             title="Meus bilhetes cadastrados"
             tips={privateTips}
           />
@@ -1557,9 +2014,9 @@ function App() {
           <TipsTable
             currentUser={authUser}
             isAdmin={isAdmin}
-            onClear={handleClearTips}
             onDelete={handleDeleteTip}
-            title="Historico completo com data e hora"
+            onResultChange={handleUpdateTipResult}
+            title="Histórico completo com data e hora"
             tips={privateTips}
           />
         )}

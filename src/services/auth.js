@@ -1,7 +1,26 @@
 import { firebaseEnabled, getFirebaseApp, getFirebaseDb } from "./firebase";
+import { createPublicRankingProfile } from "./rankings";
 
 const LOCAL_USER_KEY = "tipster-rank-user";
 const LOCAL_USERS_KEY = "tipster-rank-users";
+
+function validatePassword(password) {
+  if (password.length < 8) {
+    throw new Error("Use uma senha com pelo menos 8 caracteres.");
+  }
+
+  if (!/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+    throw new Error("Use uma senha com letra maiuscula, minuscula e numero.");
+  }
+}
+
+function authErrorMessage(error) {
+  if (error?.code === "auth/email-already-in-use") return "Este e-mail ja possui cadastro.";
+  if (error?.code === "auth/weak-password") return "Use uma senha mais forte.";
+  if (error?.code === "auth/invalid-email") return "Informe um e-mail valido.";
+  if (error?.code === "auth/too-many-requests") return "Muitas tentativas. Aguarde um pouco e tente novamente.";
+  return "Nao foi possivel entrar. Confira e-mail e senha.";
+}
 
 function localUserFromEmail(email, name, nick, phone, createdAt) {
   return {
@@ -12,6 +31,8 @@ function localUserFromEmail(email, name, nick, phone, createdAt) {
     phone: phone || "",
     createdAt: createdAt || null,
     displayName: nick || "",
+    role: "tipster",
+    isAdmin: false,
   };
 }
 
@@ -66,9 +87,11 @@ async function loadUserProfile(user) {
   const normalizedUser = normalizeFirebaseUser(user);
   if (!normalizedUser || !firebaseEnabled) return normalizedUser;
 
+  const token = await user.getIdTokenResult();
   const db = await getFirebaseDb();
   const { doc, getDoc } = await import("firebase/firestore");
   const profile = await getDoc(doc(db, "users", normalizedUser.uid));
+  const claimsRole = token.claims.admin ? "admin" : token.claims.role;
 
   if (!profile.exists()) return normalizedUser;
 
@@ -79,6 +102,8 @@ async function loadUserProfile(user) {
     nick: data.nick || "",
     phone: data.phone || "",
     displayName: data.nick || normalizedUser.displayName,
+    role: claimsRole || data.role || "tipster",
+    isAdmin: Boolean(token.claims.admin || claimsRole === "admin"),
   };
 }
 
@@ -110,6 +135,8 @@ export async function signUp({ name, nick, phone, email, password }) {
     throw new Error("Informe o Nick para concluir o cadastro.");
   }
 
+  validatePassword(password);
+
   if (!firebaseEnabled) {
     const user = localUserFromEmail(cleanEmail, cleanName, cleanNick, cleanPhone, createdAt);
     saveLocalProfile(user);
@@ -134,6 +161,11 @@ export async function signUp({ name, nick, phone, email, password }) {
     createdAtIso: createdAt,
     role: "tipster",
   });
+  await createPublicRankingProfile({
+    uid: credential.user.uid,
+    name: cleanName,
+    nick: cleanNick,
+  });
 
   return {
     uid: credential.user.uid,
@@ -143,6 +175,8 @@ export async function signUp({ name, nick, phone, email, password }) {
     phone: cleanPhone,
     createdAt,
     displayName: cleanNick,
+    role: "tipster",
+    isAdmin: false,
   };
 }
 
@@ -155,8 +189,28 @@ export async function signIn(email, password) {
 
   const app = await getFirebaseApp();
   const { getAuth, signInWithEmailAndPassword } = await import("firebase/auth");
-  const credential = await signInWithEmailAndPassword(getAuth(app), email, password);
-  return loadUserProfile(credential.user);
+  try {
+    const credential = await signInWithEmailAndPassword(getAuth(app), email, password);
+    return loadUserProfile(credential.user);
+  } catch (error) {
+    throw new Error(authErrorMessage(error));
+  }
+}
+
+export async function resetPassword(email) {
+  if (!firebaseEnabled) throw new Error("Recuperacao de senha indisponivel neste ambiente.");
+  const app = await getFirebaseApp();
+  const { getAuth, sendPasswordResetEmail } = await import("firebase/auth");
+  const auth = getAuth(app);
+  auth.languageCode = "pt-BR";
+  try {
+    await sendPasswordResetEmail(auth, email.trim());
+  } catch (error) {
+    if (error?.code === "auth/user-not-found") return;
+    if (error?.code === "auth/invalid-email") throw new Error("Informe um e-mail valido.");
+    if (error?.code === "auth/too-many-requests") throw new Error("Aguarde um pouco antes de tentar novamente.");
+    throw new Error("Nao foi possivel enviar a recuperacao. Tente novamente em instantes.");
+  }
 }
 
 export async function signOutUser() {

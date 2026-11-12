@@ -92,6 +92,39 @@ export async function deleteTip(id) {
   writeLocalTips(readLocalTips().filter((tip) => tip.id !== id));
 }
 
+export async function updateTipResult(id, result, profit, pushValue = null) {
+  const updatedAt = new Date().toISOString();
+  const normalizedPushValue = result === "push" ? Number(pushValue || 0) : null;
+
+  if (firebaseEnabled) {
+    const db = await getFirebaseDb();
+    const { doc, updateDoc } = await import("firebase/firestore");
+    await updateDoc(doc(db, COLLECTION, id), {
+      result,
+      profit,
+      pushValue: normalizedPushValue,
+      resolvedAt: result === "pending" ? null : updatedAt,
+      updatedAt,
+    });
+    return;
+  }
+
+  writeLocalTips(
+    readLocalTips().map((tip) =>
+      tip.id === id
+        ? {
+            ...tip,
+            result,
+            profit,
+            pushValue: normalizedPushValue,
+            resolvedAt: result === "pending" ? null : updatedAt,
+            updatedAt,
+          }
+        : tip,
+    ),
+  );
+}
+
 export async function clearTips() {
   if (firebaseEnabled) {
     const db = await getFirebaseDb();
