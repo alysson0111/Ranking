@@ -946,7 +946,23 @@ function TipLauncher({ onOpen }) {
   );
 }
 
-function TipForm({ onSubmit, onCancel, saving }) {
+function TipForm({ onSubmit, onCancel, saving, tips = [] }) {
+  const knownNames = useMemo(() => {
+    const names = new Map();
+    for (const tip of tips) {
+      const selections = tip.ticketSelections?.length ? tip.ticketSelections : [tip];
+      for (const selection of selections) {
+        if (selection.syntheticMatch) continue;
+        for (const value of [selection.homeTeam, selection.awayTeam]) {
+          const name = String(value || "").trim().replace(/\s+/g, " ");
+          if (!name || /^(bilhete|ocr|mandante|visitante)$/i.test(name)) continue;
+          const key = normalizeText(name);
+          if (!names.has(key)) names.set(key, name);
+        }
+      }
+    }
+    return [...names.values()].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [tips]);
   const [form, setForm] = useState(initialTipForm);
   const [receiptMarkets, setSelectedMarkets] = useState([]);
   const [entryMode, setEntryMode] = useState("ocr");
@@ -1099,7 +1115,8 @@ function TipForm({ onSubmit, onCancel, saving }) {
       <div className="ticket-layout">
         <div className="ticket-main">
           {entryMode === "manual" ? <div className="form-grid">
-            {[ ["home", "Mandante / Jogador 1"], ["away", "Visitante / Jogador 2"], ["market", "Mercado e seleção"] ].map(([name, label]) => <label className="field" key={name}><span>{label}</span><input required value={manual[name]} onChange={(event) => setManual({ ...manual, [name]: event.target.value })} /></label>)}
+            {[ ["home", "Mandante / Jogador 1"], ["away", "Visitante / Jogador 2"], ["market", "Mercado e seleção"] ].map(([name, label]) => <label className="field" key={name}><span>{label}</span><input required list={name === "market" ? undefined : `names-${name}`} autoComplete="off" value={manual[name]} onChange={(event) => setManual({ ...manual, [name]: event.target.value })} /></label>)}
+            {["home", "away"].map(field => <datalist id={`names-${field}`} key={field}>{manual[field].trim() && knownNames.filter(name => normalizeText(name).startsWith(normalizeText(manual[field].trim()))).slice(0, 30).map(name => <option key={name} value={name} />)}</datalist>)}
             <label className="field"><span>Esporte</span><select value={manual.sport} onChange={(event) => setManual({ ...manual, sport: event.target.value })}>{["Futebol", "Tênis", "Basquete", "FIFA", "Vôlei", "Outro"].map(value => <option key={value}>{value}</option>)}</select></label>
             <label className="field"><span>Casa de apostas</span><select value={manual.bookmaker} onChange={(event) => setManual({ ...manual, bookmaker: event.target.value })}>{bookmakers.map(value => <option key={value}>{value}</option>)}</select></label>
           </div> : <section className="receipt-reader" onPaste={handlePaste}>
@@ -2000,6 +2017,7 @@ function App() {
       <div className={tipEditorOpen && authUser ? "content-grid editor-grid" : "content-grid public-grid"}>
         {tipEditorOpen && authUser ? (
           <TipForm
+            tips={tips}
             onCancel={() => setTipEditorOpen(false)}
             onSubmit={handleAddTip}
             saving={savingTip}
